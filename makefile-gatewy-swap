@@ -1,0 +1,75 @@
+# Include files.
+-include dev/**/Makefile
+
+
+#### Pipeline
+
+.PHONY: gateway-swap-dev-build ## Build gateway swap dev image
+gateway-swap-dev-build: gateway-swap-build
+	docker compose build gateway_swap_dev
+
+.PHONY: gateway-swap-integration-test ## Run integration tests
+gateway-swap-integration-test: gateway-swap-build gateway-swap-dev-build
+	docker network create "arc_geo_dev_net" || true
+	docker compose --profile test-integration up -d gateway_swap_test_db
+	sleep 3
+	docker compose --profile test-integration run -e DB_HOST=gateway_swap_test_db --name gateway_swap_integration_test --rm gateway_swap_dev \
+		bash -c "python alembic/create_database.py && alembic upgrade head && pytest -v tests/integration"
+
+.PHONY: gateway-swap-lint ## Run linting check
+gateway-swap-lint: gateway-swap-dev-build
+	docker network create "arc_geo_dev_net" || echo "OK"
+	docker compose run --name gateway_swap_lint --rm gateway_swap_dev bash -c "poetry check"
+	docker compose run --name gateway_swap_lint --rm gateway_swap_dev bash -c "ruff check"
+	docker compose run --name gateway_swap_lint --rm gateway_swap_dev bash -c "ruff format --check"
+
+.PHONY: gateway-swap-mypy ## Run mypy
+gateway-swap-mypy: gateway-swap-dev-build
+	docker compose run --name gateway_swap_mypy --rm gateway_swap_dev \
+		mypy .
+
+.PHONY: gateway-swap-unit-test-coverage ## Run all tests at once. Used in the pipeline.
+gateway-swap-unit-test-coverage: gateway-swap-dev-build
+	docker network create "arc_geo_dev_net" || true
+	docker compose --profile test-integration down
+	docker rm -f gateway_swap_integration_test 2> /dev/null || true
+	docker compose --profile test-integration up -d gateway_swap_test_db
+	sleep 3
+	docker compose --profile test-integration run -e DB_HOST=gateway_swap_test_db --name gateway_swap_integration_test gateway_swap_dev \
+		bash -c "python alembic/create_database.py && alembic upgrade head && pytest -v --junitxml=/app/test/test-results.xml --no-cov-on-fail --cov=gateway_swap  --cov-report xml:/app/test/cov.xml tests/"
+	docker compose --profile test-integration down
+
+
+### Local run
+
+.PHONY: gateway-swap-build ## Build gateway swap prod image
+gateway-swap-build:
+	docker compose build gateway_swap
+
+.PHONY: gateway-swap-run ## Run gateway swap locally
+gateway-swap-run: gateway-swap-build
+	DB_HOST=gateway_swap_test_db DB_NAME=gateway_swap PLATFORM_URL="http://emulators_api:8090/hns" docker compose --profile local-run up -d
+	sleep 3
+	docker compose run -e DB_HOST=gateway_swap_test_db -e DB_NAME=gateway_swap --name gateway_swap_init --rm gateway_swap \
+		bash -c "python -m alembic.create_database && alembic upgrade head"
+
+.PHONY: gateway-swap-stop ## Run gateway swap locally
+gateway-swap-stop:
+	docker compose --profile local-run down
+
+### E2E
+
+.PHONY: gateway-swap-e2e ## Run gateway swap locally
+gateway-swap-e2e: gateway-swap-build
+	DB_HOST=gateway_swap_test_db DB_NAME=gateway_swap SKIP_AUTH="skip_gwswap_auth" PLATFORM_URL="http://host.docker.internal:9080" docker compose --profile local-run up -d
+	sleep 3
+	docker compose run -e DB_HOST=gateway_swap_test_db -e DB_NAME=gateway_swap --name gateway_swap_init --rm gateway_swap \
+		bash -c "python -m alembic.create_database && alembic upgrade head"
+
+
+.PHONY: arc-geo-help ## Display this help.
+arc-geo-help:
+	@grep -E '^.PHONY:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+	awk 'BEGIN {FS = ".PHONY:|##"}; {printf "\033[36m%s\033[0m %s\n", $$2, $$3}'
+
+.DEFAULT_GOAL := arc-geo-help
