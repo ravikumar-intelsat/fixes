@@ -1,0 +1,66 @@
+# First phase: build everything
+FROM eclipse-temurin:17-jdk AS builder
+
+# Install find command
+RUN apt-get update && apt-get install -y findutils
+
+# Set working directory in the container
+WORKDIR /app
+
+# Copy the avro-tools JAR
+COPY dev/kafka/avro-tools-1.10.2.jar /app/avro-tools.jar
+
+# Copy the AVDL files
+COPY dev/kafka/avdl /app/avdl
+
+# Generate AVSC files from AVDL files
+# RUN find -L . -iname "*.avdl" -print | xargs -I '{}' sh -c 'mkdir $(dirname $1)/schemas 1>/dev/null 2>&1 ;cd $(dirname $1)/schemas 1>/dev/null  && echo "Compiling $1:" && java -jar "$2" idl2schemata ../$(basename $1) || exit 1 ' sh {} "$(readlink -f ./avro-tools-1.9.1.jar)" && echo success
+
+RUN mkdir -p /app/data/schemas && \
+	for avdl_file in $(find /app/avdl -name *.avdl); do \
+		filepath=$(dirname ${avdl_file}); \
+		output_filepath=/app/data/schemas${filepath#"/app/avdl"}; \
+		java -jar /app/avro-tools.jar idl2schemata ${avdl_file} ${output_filepath}; \
+	done
+
+# Copy AVSC files to the correct location
+RUN for avsc_file in $(find /app/avdl -name *.avsc); do \
+		filepath=$(dirname ${avsc_file}); \
+		output_filepath=/app/data/schemas${filepath#"/app/avdl"}; \
+		cp ${avsc_file} ${output_filepath}/.; \
+	done
+
+
+# Copy topic files to the correct location
+# RUN cp /app/topics/*.yml /app/data
+# Copy the topics
+COPY dev/kafka/topics /app/data/topics
+
+# Build gafkalo CLI (https://github.com/kmetaxas/gafkalo)
+FROM golang:1.25-alpine AS gafkalo-builder
+RUN go install github.com/kmetaxas/gafkalo@latest
+
+# Second phase: create the final image
+FROM alpine
+
+# Create a non-root user and switch to it
+RUN adduser -D app
+USER app
+
+# Set working directory in the container
+WORKDIR /app
+
+# Copy the built artifacts from the builder stage
+COPY --from=builder --chown=app /app/data /app/data
+
+# Copy the gafkalo binary (built from source)
+COPY --from=gafkalo-builder --chown=app /go/bin/gafkalo /app/gafkalo
+# Copy config and entrypoint
+COPY --chown=app dev/kafka/gafkalo/src/ /app/
+COPY --chown=app dev/kafka/test_messages /app/test_messages
+RUN chmod +x /app/entrypoint.sh /app/gafkalo
+
+# init topics
+# ./gafkalo apply --config=gafkalo.config.yaml
+# add test messages
+# cat test_messages/routing_tables.json | ./gafkalo --config=gafkalo.config.yaml produce GCS.SES17.ROUTING_TABLES.T1 --separator=! --serialize
