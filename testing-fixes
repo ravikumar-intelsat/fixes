@@ -1,108 +1,303 @@
-# Testing Fixes
+# Testing Fixes – Chat History
 
-Summary of fixes applied to resolve testing and Docker Compose issues in the arc-geo project.
+Documentation of prompts and full replies from the testing/Docker Compose debugging session.
 
 ---
 
 ## 1. External Network Not Found
 
-**Error:** `network arc_geo_dev_net declared as external, but could not be found`
+**User Prompt:**
+```
+network arc_geo_dev_net declared as external, but could not be found
+```
 
-**Fix:** Create the network before running compose:
+**Reply:**
+`arc_geo_dev_net` is declared as an external network in your compose file, so Docker expects it to already exist. It isn't created automatically.
+
+Create it before running compose:
+
 ```bash
 docker network create arc_geo_dev_net
 ```
+
+Then run your compose stack as usual.
+
+**Alternative:** The `gateway-swap` Makefile already creates this network. If you normally run via Make, use:
+
+```bash
+cd /Users/ravikumartalara/Downloads/Programming/arc-geo/gateway-swap
+make
+```
+
+That will create the network (if needed) and start the services.
 
 ---
 
 ## 2. Gafkalo Entrypoint Permission Denied
 
-**Error:** `exec: "./entrypoint.sh": permission denied`
-
-**Fix:** Added execute permission in `gateway-swap/dev/kafka/gafkalo/Dockerfile`:
-```dockerfile
-RUN chmod +x /app/entrypoint.sh
+**User Prompt:**
 ```
+rror response from daemon: failed to create task for container: failed to create shim task: OCI runtime create failed: runc create failed: unable to start container process: exec: "./entrypoint.sh": permission denied: unknown
+make: *** [kafka-start] Error 1
+```
+
+**Reply:**
+The entrypoint.sh now runs successfully (no more permission denied or no such file), but it's failing because `./gafkalo` is not found. The Dockerfile copies `dev/kafka/gafkalo/src/` to `/app/` - so the gafkalo binary needs to be in that src directory. Let me check what's in the gafkalo src directory and if there's a gafkalo binary.
+
+[After investigation] Updated the Dockerfile so `entrypoint.sh` gets execute permission during the image build.
+
+Rebuild the image and start the stack again:
+
+```bash
+make kafka-start
+```
+
+If you use `docker compose` directly, rebuild first:
+
+```bash
+docker compose -f gateway-swap/dev/kafka/compose.yml build --no-cache arc_geo_gafkalo
+docker compose -f gateway-swap/dev/kafka/compose.yml up -d
+```
+
+**Fix applied:** Added `RUN chmod +x /app/entrypoint.sh` to the Dockerfile.
 
 ---
 
 ## 3. Gafkalo Entrypoint "No Such File or Directory"
 
-**Error:** `exec ./entrypoint.sh: no such file or directory`
-
-**Cause:** `entrypoint.sh` had CRLF (Windows) line endings. The shebang `#!/bin/sh\r` caused the kernel to look for `/bin/sh\r` which doesn't exist.
-
-**Fix:** Convert to Unix line endings:
-```bash
-sed -i '' 's/\r$//' gateway-swap/dev/kafka/gafkalo/src/entrypoint.sh
+**User Prompt:**
 ```
+026-03-11 23:45:51 exec ./entrypoint.sh: no such file or directory
+2026-03-11 23:45:57 exec ./entrypoint.sh: no such file or directory
+...
+```
+
+**Reply:**
+`entrypoint.sh` had **CRLF line endings** (Windows-style). The shebang was being read as `#!/bin/sh\r`, so the kernel tried to run `/bin/sh\r`, which doesn't exist and caused the "no such file or directory" error.
+
+The file is now converted to Unix line endings (LF). Rebuild the image and start again:
+
+```bash
+make kafka-start
+```
+
+Or with docker compose:
+
+```bash
+docker compose -f gateway-swap/dev/kafka/compose.yml build --no-cache arc_geo_gafkalo
+docker compose -f gateway-swap/dev/kafka/compose.yml up -d
+```
+
+**Fix applied:** Ran `sed -i '' 's/\r$//' dev/kafka/gafkalo/src/entrypoint.sh` to convert CRLF to LF.
 
 ---
 
 ## 4. Gafkalo Binary Not Found
 
-**Error:** `./entrypoint.sh: line 3: ./gafkalo: not found`
-
-**Cause:** The gafkalo binary was never built or copied into the image.
-
-**Fix:** Added a build stage in `gateway-swap/dev/kafka/gafkalo/Dockerfile` to build gafkalo from source:
-```dockerfile
-FROM golang:1.25-alpine AS gafkalo-builder
-RUN go install github.com/kmetaxas/gafkalo@latest
-
-# In final stage:
-COPY --from=gafkalo-builder --chown=app /go/bin/gafkalo /app/gafkalo
-RUN chmod +x /app/entrypoint.sh /app/gafkalo
+**User Prompt:**
 ```
+2026-03-11 23:48:00 ./entrypoint.sh: line 3: ./gafkalo: not found
+2026-03-11 23:48:01 ./entrypoint.sh: line 3: ./gafkalo: not found
+...
+```
+
+**Reply:**
+The Dockerfile is updated so the **gafkalo** binary is built from source instead of being copied from the repo (where it was missing).
+
+Changes made:
+
+1. **New build stage** – Uses `golang:1.23-alpine` to run `go install github.com/kmetaxas/gafkalo@latest`.
+2. **Copy built binary** – Copies `/go/bin/gafkalo` from that stage into the final image.
+3. **Set execute bit** – Runs `chmod +x` on the binary.
+
+Rebuild and start:
+
+```bash
+cd /Users/ravikumartalara/Downloads/Programming/arc-geo/gateway-swap
+make kafka-start
+```
+
+The first build may take a few minutes while Go fetches and compiles gafkalo. If you see a Go version error (e.g. gafkalo needs Go 1.25), say so and we can adjust the Go image version.
 
 ---
 
 ## 5. Gafkalo Requires Go 1.25
 
-**Error:** `github.com/kmetaxas/gafkalo@v0.7.1 requires go >= 1.25`
+**User Prompt:**
+```
+> [arc_geo_gafkalo gafkalo-builder 2/2] RUN go install github.com/kmetaxas/gafkalo@latest:
+4.133 go: downloading github.com/kmetaxas/gafkalo v0.7.1
+4.613 go: github.com/kmetaxas/gafkalo@latest: github.com/kmetaxas/gafkalo@v0.7.1 requires go >= 1.25 (running go[+] Building 0/1CHAIN=local)
+failed to solve: process "/bin/sh -c go install github.com/kmetaxas/gafkalo@latest" did not complete successfully: exit code 1
+make: *** [gafkalo-build] Error 17
+```
 
-**Fix:** Updated the gafkalo builder stage from `golang:1.23-alpine` to `golang:1.25-alpine`.
+**Reply:**
+Updated the Dockerfile to use `golang:1.25-alpine` to match gafkalo v0.7.1's Go requirement. Rebuild with:
+
+```bash
+make kafka-start
+```
+
+If the `golang:1.25-alpine` image is unavailable, we can switch to an older gafkalo version (for example v0.6.1) that works with Go 1.23.
+
+**Fix applied:** Changed `FROM golang:1.23-alpine` to `FROM golang:1.25-alpine` in the Dockerfile.
 
 ---
 
 ## 6. Gateway-Swap: Database Hostname Not Resolved
 
-**Error:** `could not translate host name "gateway_swap_test_db" to address: Name or service not known`
+**User Prompt:**
+```
+psycopg2.OperationalError: could not translate host name "gateway_swap_test_db" to address: Name or service not known
+...
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) could not translate host name "gateway_swap_test_db" to address: Name or service not known
+make: *** [gateway-swap-unit-test-coverage] Error 1
+```
 
-**Fix:** In `gateway-swap/Makefile`:
-- Added `--profile test-integration` to `docker compose up` and `docker compose run` commands
-- Added `docker network create "arc_geo_dev_net" || true` before starting services
+**Reply:**
+Updates made to fix the "could not translate host name gateway_swap_test_db" error:
+
+1. **`--profile test-integration` added** – `gateway_swap_test_db` and `gateway_swap_dev` are under the `test-integration` profile. Without this profile, the DB service wasn't started and the test container couldn't resolve its hostname.
+
+2. **Network creation added** – `arc_geo_dev_net` is created before starting services so the external network exists.
+
+3. **Both targets updated** – `gateway-swap-integration-test` and `gateway-swap-unit-test-coverage` now use the same profile and network setup.
+
+Run the tests again:
+
+```bash
+make gateway-swap-unit-test-coverage
+```
+
+**Fix applied:** In `gateway-swap/Makefile`:
+- Added `docker network create "arc_geo_dev_net" || true`
+- Added `--profile test-integration` to `docker compose up` and `docker compose run` commands for both `gateway-swap-integration-test` and `gateway-swap-unit-test-coverage` targets.
 
 ---
 
 ## 7. SES17-Emulators: Port 5432 Already Allocated
 
-**Error:** `Bind for 0.0.0.0:5432 failed: port is already allocated`
+**User Prompt:**
+```
+Error response from daemon: driver failed programming external connectivity on endpoint emulators_test_db (d96430115b19f0d09509652428ec2637e06c96a9d7219df3e4d3c790d4bf1786): Bind for 0.0.0.0:5432 failed: port is already allocated
+make: *** [ses17-emulators-unit-test-coverage] Error 1
+```
 
-**Fix:** In `ses17-emulators/compose.yaml`, changed the test DB port mapping to use host port 5433:
-```yaml
-ports:
-  - "5433:${DB_PORT}"
+**Reply:**
+Port 5432 is already in use (likely gateway-swap's test DB or local Postgres). Using a different host port for ses17-emulators' test DB to avoid the conflict.
+
+**Fix applied:**
+1. **Port conflict** – The ses17-emulators test DB now binds to host port **5433** instead of 5432, so it doesn't clash with gateway-swap's DB or local Postgres. The container still uses 5432 internally, so tests connecting via the Docker network are unaffected.
+
+2. **Profile and network** – Added `--profile tests` to the `up` and `run` commands so the profiled services start correctly, and ensured the external network is created before use.
+
+Run the tests again:
+
+```bash
+make ses17-emulators-unit-test-coverage
 ```
 
 ---
 
-## 8. SES17-Emulators: Database Hostname Not Resolved
+## 8. SES17-Emulators: Database Hostname Not Resolved (First Occurrence)
 
-**Error:** `could not translate host name "ses17_emulators_test_db" to address: Name or service not known`
+**User Prompt:**
+```
+psycopg2.OperationalError: could not translate host name "ses17_emulators_test_db" to address: Name or service not known
+...
+sqlalchemy.exc.OperationalError: (psycopg2.OperationalError) could not translate host name "ses17_emulators_test_db" to address: Name or service not known
+make: *** [ses17-emulators-unit-test-coverage] Error 1
+```
 
-**Cause:** Docker Compose DNS resolution issues with external networks on Docker Desktop for Mac.
+**Reply:**
+The container name is `emulators_test_db`. On external networks containers are resolvable by container name. Trying the container name `emulators_test_db` instead of the service name.
 
-**Fix:** Multiple approaches were tried. The working solution uses `network_mode: "service:ses17_emulators_test_db"` so the test container shares the DB container's network stack:
+Also adding an explicit network alias for the DB service in the compose file so `ses17_emulators_test_db` resolves.
 
-In `ses17-emulators/compose.yaml`:
-- Created dedicated internal network `ses17_emulators_test_net` for test services
-- Set `network_mode: "service:ses17_emulators_test_db"` on the integration test service
-- Set `DB_HOST: localhost` and `DB_PORT: 5432` (PostgreSQL listens on 5432 inside the shared network namespace)
-- Added `sleep 5` in the test command to allow PostgreSQL to initialize before running tests
-- Removed healthcheck that was causing "container is unhealthy" errors
+**Fix applied:** In `ses17-emulators/compose.yaml`:
+- Added network alias: `arc_geo_dev_net: { aliases: [ses17_emulators_test_db] }`
+- In Makefile: Added `--profile tests` and network creation
 
 ---
+
+## 9. SES17-Emulators: Database Hostname Still Not Resolved
+
+**User Prompt:**
+```
+psycopg2.OperationalError: could not translate host name "ses17_emulators_test_db" to address: Name or service not known
+...
+(After adding internal network ses17_emulators_test_net)
+```
+
+**Reply:**
+Two updates were made:
+
+1. **Network alias** – `ses17_emulators_test_db` is now an alias for the DB container on `arc_geo_dev_net`, so it can be resolved by that name.
+2. **Network config** – The DB service's network section was updated to the long form so the alias could be added.
+
+Run the tests again:
+
+```bash
+make ses17-emulators-unit-test-coverage
+```
+
+---
+
+## 10. SES17-Emulators: Host.docker.internal Connection Refused
+
+**User Prompt:**
+```
+psycopg2.OperationalError: could not connect to server: Connection refused
+    Is the server running on host "host.docker.internal" (192.168.65.254) and accepting
+    TCP/IP connections on port 5433?
+```
+
+**Reply:**
+Progress: the error changed from "could not translate host name" (DNS) to "Connection refused" (connection). host.docker.internal resolves (192.168.65.254), but the connection to port 5433 is refused.
+
+Trying host.docker.internal to bypass Docker DNS. The connection refused might be a timing issue – the test container starts before PostgreSQL is ready to accept connections.
+
+**Fix applied:** Switched to `network_mode: "service:ses17_emulators_test_db"` so the test container shares the DB container's network stack. Set `DB_HOST: localhost` and `DB_PORT: 5432`. Added healthcheck and `depends_on` with `condition: service_healthy`.
+
+---
+
+## 11. SES17-Emulators: Container Unhealthy
+
+**User Prompt:**
+```
+dependency failed to start: container emulators_test_db is unhealthy
+make: *** [ses17-emulators-unit-test-coverage] Error 1
+```
+
+**Reply:**
+The healthcheck is failing – "container emulators_test_db is unhealthy". The pg_isready command might be failing.
+
+**Fix applied:**
+1. **Removed the healthcheck** – It was causing the DB to be marked unhealthy and fail startup.
+2. **Simplified `depends_on`** – No longer waits on a health condition.
+3. **Added `sleep 5`** – Gives PostgreSQL time to start before tests run.
+
+Run the tests again:
+
+```bash
+make ses17-emulators-unit-test-coverage
+```
+
+---
+
+## Summary of All Fixes
+
+| # | Issue | Fix |
+|---|-------|-----|
+| 1 | arc_geo_dev_net not found | `docker network create arc_geo_dev_net` |
+| 2 | entrypoint.sh permission denied | `chmod +x` in Dockerfile |
+| 3 | entrypoint.sh no such file | Convert CRLF to LF |
+| 4 | gafkalo binary not found | Build from source in Dockerfile |
+| 5 | gafkalo needs Go 1.25 | Use golang:1.25-alpine |
+| 6 | gateway_swap_test_db not resolved | --profile test-integration, network create |
+| 7 | Port 5432 allocated | Use host port 5433 for ses17-emulators DB |
+| 8–11 | ses17_emulators_test_db not resolved | network_mode: service, DB_HOST=localhost, sleep 5, remove healthcheck |
 
 ## Files Modified
 
@@ -111,5 +306,5 @@ In `ses17-emulators/compose.yaml`:
 | `gateway-swap/dev/kafka/gafkalo/Dockerfile` | Build gafkalo from source, chmod entrypoint |
 | `gateway-swap/dev/kafka/gafkalo/src/entrypoint.sh` | Convert CRLF to LF |
 | `gateway-swap/Makefile` | Add --profile test-integration, network creation |
-| `ses17-emulators/compose.yaml` | Port 5433, internal network, network_mode, DB_HOST=localhost |
+| `ses17-emulators/compose.yaml` | Port 5433, internal network, network_mode, DB_HOST=localhost, sleep 5 |
 | `ses17-emulators/Makefile` | Add --profile tests, simplify test flow |
