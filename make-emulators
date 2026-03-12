@@ -1,0 +1,56 @@
+# Include files.
+-include dev/**/Makefile
+
+
+##### Pipeline
+
+.PHONY: ses17-emulators-dev-build ## Build gateway swap dev image
+ses17-emulators-dev-build:
+	docker compose build ses17_emulators_dev
+
+.PHONY: ses17-emulators-lint ## Run linting check
+ses17-emulators-lint: ses17-emulators-dev-build
+	docker network create "arc_geo_dev_net" || echo "OK"
+	docker compose run --name ses17_emulators_lint --rm ses17_emulators_dev bash -c "poetry check"
+	docker compose run --name ses17_emulators_lint --rm ses17_emulators_dev bash -c "ruff check"
+	docker compose run --name ses17_emulators_lint --rm ses17_emulators_dev bash -c "ruff format --check"
+
+.PHONY: ses17-emulators-mypy ## Run mypy
+ses17-emulators-mypy: ses17-emulators-dev-build
+	docker compose run --name ses17_emulators_mypy --rm ses17_emulators_dev mypy src
+
+.PHONY: ses17-emulators-unit-test-coverage ## Run all tests at once. Used in the pipeline.
+ses17-emulators-unit-test-coverage: ses17-emulators-dev-build
+	docker compose --profile tests down
+	docker rm -f ses17_emulators_integration_test 2> /dev/null || true
+	docker compose --profile tests up --abort-on-container-exit ses17_emulators_integration_test
+	docker compose --profile tests down
+
+
+##### Local Run
+
+.PHONY: ses17-emulators-build ## Build gateway swap prod image
+ses17-emulators-build:
+	docker compose build ses17_emulators_gcs_sim
+
+.PHONY: ses17-emulators-run ## Run gateway swap locally with the gw swap db. The Gateway Swap must be already running
+ses17-emulators-run: ses17-emulators-build
+	DB_HOST=gateway_swap_test_db docker compose --profile local-run up -d
+	docker compose run -e DB_HOST=gateway_swap_test_db --name ses17_emulators_init --rm ses17_emulators_gcs_sim \
+		bash -c "python -m migrations.create_database && alembic upgrade head"
+
+
+.PHONY: ses17-emulators-stop ## Run gateway swap locally
+ses17-emulators-stop:
+	docker compose --profile local-run down
+	docker compose --profile tests down
+
+
+##### Help
+
+.PHONY: ses17-emulators-help ## Display this help.
+ses17-emulators-help:
+	@grep -E '^.PHONY:.*?## .*$$' $(MAKEFILE_LIST) | sort | \
+	awk 'BEGIN {FS = ".PHONY:|##"}; {printf "\033[36m%s\033[0m %s\n", $$2, $$3}'
+
+.DEFAULT_GOAL := ses17-emulators-help
