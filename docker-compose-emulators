@@ -1,0 +1,96 @@
+services:
+  ses17_emulators_gcs_sim:
+    image: ses17-emulators/emulators
+    build:
+      dockerfile: Dockerfile
+      target: production
+      args:
+        - CONTAINER_REGISTRY=${CONTAINER_REGISTRY}
+    container_name: emulators_gcs_sim
+    tty: true
+    stdin_open: true
+    command: python -m emulators.entrypoints.gcs_sim.run
+    restart: unless-stopped
+    env_file:
+      - ./.env
+    networks:
+      - arc_geo_dev_net
+    environment:
+      DB_NAME: "${DB_NAME}"
+      DB_HOST: "${DB_HOST}"
+    profiles:
+      - local-run
+
+  ses17_emulators_api:
+    image: ses17-emulators/emulators
+    build:
+      dockerfile: Dockerfile
+      target: production
+    container_name: emulators_api
+    command: uvicorn --factory emulators.entrypoints.api.app:app --host ${SERVER_HOST} --port ${SERVER_PORT}
+    restart: unless-stopped
+    ports:
+      - ${SERVER_PORT}:${SERVER_PORT}
+    env_file:
+      - ./.env
+    networks:
+      - arc_geo_dev_net
+    environment:
+      DB_NAME: ${DB_NAME}
+      DB_HOST: ${DB_HOST}
+    profiles:
+      - local-run
+
+  ses17_emulators_test_db:
+    image: postgres:11
+    container_name: emulators_test_db
+    restart: always
+    ports:
+      - "5433:${DB_PORT}"
+    env_file:
+      - ./.env
+    environment:
+      POSTGRES_USER: ${DB_USERNAME}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      PGPORT: ${DB_PORT}
+    networks:
+      - ses17_emulators_test_net
+    command: ["postgres", "-c", "log_statement=all"]
+    profiles:
+      - tests
+
+  ses17_emulators_dev:
+    image: ses17-emulators/emulators/tests
+    build:
+      dockerfile: Dockerfile
+      target: development
+      args:
+        - CONTAINER_REGISTRY=${CONTAINER_REGISTRY}
+    container_name: emulators_dev
+    env_file:
+      - ./.env
+    networks:
+      - arc_geo_dev_net
+    profiles:
+      - tests
+
+  ses17_emulators_integration_test:
+    image: ses17-emulators/emulators/tests
+    container_name: ses17_emulators_integration_test
+    env_file:
+      - ./.env
+    environment:
+      DB_HOST: localhost
+      DB_PORT: 5432
+    network_mode: "service:ses17_emulators_test_db"
+    depends_on:
+      - ses17_emulators_test_db
+    profiles:
+      - tests
+    command: bash -c "sleep 5 && python -m migrations.create_database && alembic upgrade head && pytest -v --junitxml=/app/test/test-results.xml --no-cov-on-fail --cov=emulators --cov-report xml:/app/test/cov.xml tests/"
+
+networks:
+  arc_geo_dev_net:
+    external: true
+  ses17_emulators_test_net:
+    driver: bridge
